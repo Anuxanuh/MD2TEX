@@ -64,10 +64,32 @@ def make_header(header_path: Path, font_dir: Path, font_name: str, font_file: Pa
 \usepackage{{booktabs}}
 \usepackage{{array}}
 \usepackage{{calc}}
+\usepackage{{quoting}}
+\usepackage{{mdframed}}
 \usepackage{{ragged2e}}
 \usepackage{{longtable}}
 \usepackage[a4paper,margin=25.4mm]{{geometry}}
-\definecolor{{codebg}}{{RGB}}{{225,225,225}}
+\definecolor{{codebg}}{{RGB}}{{240,240,240}}
+\definecolor{{quotebg}}{{RGB}}{{248,248,248}}
+\definecolor{{quoteborder}}{{RGB}}{{200,200,200}}
+\newmdenv[
+    linewidth=2pt,
+    linecolor=quoteborder,
+    backgroundcolor=quotebg,
+    topline=false,
+    rightline=false,
+    bottomline=false,
+    leftmargin=0pt,
+    rightmargin=0pt,
+    innerleftmargin=0.8em,
+    innerrightmargin=0.8em,
+    innertopmargin=0.45em,
+    innerbottommargin=0.45em,
+    skipabove=0.7em,
+    skipbelow=0.7em
+]{{quoteblock}}
+\quotingsetup{{leftmargin=0pt,rightmargin=0pt,vskip=0pt}}
+\renewenvironment{{quote}}{{\begin{{quoteblock}}\begin{{quoting}}}}{{\end{{quoting}}\end{{quoteblock}}}}
 \lstset{{
 	backgroundcolor=\color{{codebg}},
 	basicstyle=\ttfamily\small,
