@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 import sys
 
-FONT_DIR = Path(r"C:\Users\ASUS\AppData\Local\Microsoft\Windows\Fonts")
+FONT_DIR = Path.home() / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts"
 FONT_FILE_NAME = "MapleMonoNormalNL-NF-CN"
 FONT_NAME = "Maple Mono Normal NL NF CN"
 
