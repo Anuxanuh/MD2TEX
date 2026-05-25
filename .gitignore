@@ -1,4 +1,4 @@
-## Core latex/pdflatex auxiliary files:
+## Core LaTeX/PDFLaTeX auxiliary files and Python build artifacts:
 *.aux
 *.lof
 *.log
@@ -8,6 +8,13 @@
 *.toc
 *.fmt
 *.fot
+__pycache__/
+*.pyc
+*.pyo
+*.dist-info/
+wheelhouse/
+build/
+venv/
 *.cb
 *.cb2
 .*.lb
