@@ -4,6 +4,7 @@ import argparse
 import re
 import shutil
 import subprocess
+import unicodedata
 from pathlib import Path
 import sys
 
@@ -62,6 +63,7 @@ def make_header(header_path: Path, font_dir: Path, font_name: str, font_file: Pa
 \usepackage{{fontspec}}
 \usepackage{{booktabs}}
 \usepackage{{array}}
+\usepackage{{calc}}
 \usepackage{{ragged2e}}
 \usepackage{{longtable}}
 \usepackage[a4paper,margin=25.4mm]{{geometry}}
@@ -190,18 +192,90 @@ def _parse_columns(spec: str) -> list[str]:
     return columns
 
 
-def _bordered_colspec(spec: str) -> str:
+def _measure_text_units(text: str) -> int:
+    # For mono font layout: CJK/full-width chars count as 2, others count as 1.
+    cleaned = re.sub(r"\\[a-zA-Z@]+", " ", text)
+    cleaned = re.sub(r"\\([\\{}%_$&#])", r"\1", cleaned)
+    cleaned = cleaned.replace("{", " ").replace("}", " ")
+    total = 0
+    for ch in cleaned:
+        if ch.isspace():
+            continue
+        total += 2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1
+    return max(1, total)
+
+
+def _extract_word_units(text: str) -> list[int]:
+    cleaned = re.sub(r"\\[a-zA-Z@]+", " ", text)
+    cleaned = re.sub(r"\\([\\{}%_$&#])", r"\1", cleaned)
+    cleaned = cleaned.replace("{", " ").replace("}", " ")
+    tokens = re.findall(r"[A-Za-z0-9_./:+-]+|[\u3400-\u9fff]", cleaned)
+    units: list[int] = []
+    for token in tokens:
+        if len(token) == 1 and unicodedata.east_asian_width(token) in {"W", "F"}:
+            units.append(2)
+        else:
+            units.append(len(token))
+    return units
+
+
+def _estimate_column_metrics(table_block: str, column_count: int) -> tuple[list[int], list[int]]:
+    if column_count <= 0:
+        return [], []
+    unit_counts = [1] * column_count
+    longest_word_units = [1] * column_count
+    for line in table_block.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("%"):
+            continue
+        if "&" not in line or r"\\" not in line:
+            continue
+        row_part = line.split(r"\\", 1)[0]
+        cells = re.split(r"(?<!\\)&", row_part)
+        for i in range(min(column_count, len(cells))):
+            cell = cells[i]
+            unit_counts[i] += _measure_text_units(cell)
+            words = _extract_word_units(cell)
+            if words:
+                longest_word_units[i] = max(longest_word_units[i], max(words))
+    return unit_counts, longest_word_units
+
+
+def _bordered_colspec(
+    spec: str,
+    column_total_units: list[int] | None = None,
+    column_longest_word_units: list[int] | None = None,
+) -> str:
     columns = _parse_columns(spec)
     if not columns:
         return "!{\\vrule width 0.75pt}p{\\textwidth}!{\\vrule width 0.75pt}"
     count = len(columns)
-    width = r"\dimexpr(\textwidth - 2\tabcolsep*%d - %d\arrayrulewidth)/%d\relax" % (
-        count, count + 1, count)
+    if column_total_units and len(column_total_units) == count:
+        units = [max(1, value) for value in column_total_units]
+        total_units = sum(units)
+        widths: list[str] = []
+        for index, unit in enumerate(units):
+            proportional = (
+                r"\dimexpr(\textwidth - 2\tabcolsep*%d - %d\arrayrulewidth)*%d/%d\relax"
+                % (count, count + 1, unit, total_units)
+            )
+            if column_longest_word_units and len(column_longest_word_units) == count:
+                # In mono fonts, 1 ASCII char ~= 0.5em and 1 CJK char ~= 1em (counted as 2 units).
+                min_em = max(0.5, column_longest_word_units[index] / 2.0)
+                widths.append(r"\maxof{%s}{%.2fem}" % (proportional, min_em))
+            else:
+                widths.append(proportional)
+    else:
+        widths = [
+            r"\dimexpr(\textwidth - 2\tabcolsep*%d - %d\arrayrulewidth)/%d\relax"
+            % (count, count + 1, count)
+        ] * count
     rr = r">{\RaggedRight\arraybackslash\hspace{0pt}\sloppy}"
     rc = r">{\Centering\arraybackslash\hspace{0pt}\sloppy}"
     rl = r">{\RaggedLeft\arraybackslash\hspace{0pt}\sloppy}"
     converted: list[str] = []
-    for column in columns:
+    for index, column in enumerate(columns):
+        width = widths[index]
         if column == "l":
             converted.append(f"{rr}p{{{width}}}")
         elif column == "c":
@@ -211,10 +285,7 @@ def _bordered_colspec(spec: str) -> str:
         elif column == "X":
             converted.append(f"{rr}p{{{width}}}")
         elif column.startswith("p") or column.startswith("m") or column.startswith("b"):
-            kind = column[0]
-            inner = column[2:-1]
-            adjusted = f"({inner}) - {count + 1}\\arrayrulewidth/{count}"
-            converted.append(f"{rr}{kind}{{{adjusted}}}")
+            converted.append(f"{rr}p{{{width}}}")
         else:
             converted.append(f"{rr}p{{{width}}}")
     return r"!{\vrule width 0.75pt}" + "|".join(converted) + r"!{\vrule width 0.75pt}"
@@ -225,6 +296,7 @@ def _replace_table_begins_with_bordered(content: str) -> str:
     parts: list[str] = []
     cursor = 0
     for match in pattern.finditer(content):
+        env_name = match.group(1)
         brace_start = match.end()
         if brace_start >= len(content) or content[brace_start] != "{":
             continue
@@ -242,9 +314,16 @@ def _replace_table_begins_with_bordered(content: str) -> str:
         if depth != 0:
             continue
         spec = content[brace_start + 1:brace_end]
+        end_marker = f"\\end{{{env_name}}}"
+        end_pos = content.find(end_marker, brace_end + 1)
+        if end_pos == -1:
+            continue
+        table_block = content[match.start():end_pos + len(end_marker)]
+        column_total_units, column_longest_word_units = _estimate_column_metrics(
+            table_block, len(_parse_columns(spec)))
         parts.append(content[cursor:match.start()])
         parts.append(
-            f"\\begin{{{match.group(1)}}}{{{_bordered_colspec(spec)}}}")
+            f"\\begin{{{env_name}}}{{{_bordered_colspec(spec, column_total_units, column_longest_word_units)}}}")
         cursor = brace_end + 1
     parts.append(content[cursor:])
     return "".join(parts)
@@ -321,9 +400,35 @@ def add_full_table_borders(tex_path: Path) -> None:
     tex_path.write_text(content, encoding="utf-8")
 
 
+def add_page_breaks_for_titles_and_subsections(tex_path: Path) -> None:
+    content = tex_path.read_text(encoding="utf-8")
+
+    # Insert a page break right after \maketitle when it exists and is not already followed by one.
+    content = re.sub(r"(\\maketitle)(?!\s*\\newpage)",
+                     r"\1\n\\newpage", content)
+
+    lines = content.splitlines(keepends=True)
+    new_lines: list[str] = []
+    subsection_pattern = re.compile(r"^\s*\\subsection(?:\[[^\]]*\])?\{")
+
+    for line in lines:
+        if subsection_pattern.match(line):
+            prev_nonempty: str | None = None
+            for prev in reversed(new_lines):
+                if prev.strip():
+                    prev_nonempty = prev.strip()
+                    break
+            if prev_nonempty != r"\newpage":
+                new_lines.append("\\newpage\n")
+        new_lines.append(line)
+
+    tex_path.write_text("".join(new_lines), encoding="utf-8")
+
+
 def postprocess_tex(tex_path: Path) -> None:
     fix_hyperref_targets(tex_path)
     style_inline_code(tex_path)
+    add_page_breaks_for_titles_and_subsections(tex_path)
     add_full_table_borders(tex_path)
 
 
